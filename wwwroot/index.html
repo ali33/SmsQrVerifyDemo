@@ -1,0 +1,221 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>SMS QR Verify Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            line-height: 1.4;
+        }
+
+        .wrap {
+            max-width: 760px;
+        }
+
+        input, button, textarea {
+            font-size: 14px;
+            padding: 8px;
+        }
+
+        input, textarea {
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        button {
+            cursor: pointer;
+            margin-right: 8px;
+        }
+
+        .row {
+            margin-bottom: 16px;
+        }
+
+        .box {
+            border: 1px solid #ccc;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 16px;
+        }
+
+        .status {
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .pending {
+            color: #aa7700;
+        }
+
+        .verified {
+            color: green;
+        }
+
+        #qrcode {
+            margin-top: 16px;
+        }
+
+        code, pre {
+            background: #f6f6f6;
+            padding: 8px;
+            display: block;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <h1>SMS QR Verify Demo</h1>
+
+        <div class="row">
+            <label>Số điện thoại cần xác minh</label>
+            <input id="phoneNumber" value="+84901234567" />
+        </div>
+
+        <div class="row">
+            <button id="btnCreate">Tạo phiên xác minh</button>
+        </div>
+
+        <div id="sessionBox" class="box" style="display:none;">
+            <div class="row">
+                <div><strong>SessionId:</strong> <span id="sessionId"></span></div>
+                <div><strong>SMS To:</strong> <span id="smsTo"></span></div>
+                <div><strong>SMS Body:</strong> <span id="smsBody"></span></div>
+                <div><strong>Status:</strong> <span id="status" class="status pending">Pending</span></div>
+            </div>
+
+            <div id="qrcode"></div>
+
+            <div class="row">
+                <p>Anh có thể scan QR bằng iPhone. Nếu máy hỗ trợ tốt, nó sẽ mở app SMS và điền sẵn nội dung.</p>
+                <p>
+                    <a id="smsLink" href="#" target="_blank">Mở link SMS trực tiếp</a>
+                </p>
+            </div>
+
+            <div class="row">
+                <button id="btnSimulate">Giả lập SMS đã gửi</button>
+            </div>
+
+            <div class="row">
+                <label>JSON kết quả</label>
+                <pre id="debug"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script>
+    let currentSession = null;
+    let pollTimer = null;
+
+    const phoneInput = document.getElementById("phoneNumber");
+    const btnCreate = document.getElementById("btnCreate");
+    const btnSimulate = document.getElementById("btnSimulate");
+    const sessionBox = document.getElementById("sessionBox");
+    const sessionIdEl = document.getElementById("sessionId");
+    const smsToEl = document.getElementById("smsTo");
+    const smsBodyEl = document.getElementById("smsBody");
+    const statusEl = document.getElementById("status");
+    const qrcodeEl = document.getElementById("qrcode");
+    const debugEl = document.getElementById("debug");
+    const smsLinkEl = document.getElementById("smsLink");
+
+    btnCreate.addEventListener("click", async () => {
+        clearInterval(pollTimer);
+        pollTimer = null;
+
+        const phoneNumber = phoneInput.value.trim();
+        if (!phoneNumber) {
+            alert("Nhập số điện thoại");
+            return;
+        }
+
+        const res = await fetch("/api/verification/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phoneNumber })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            debugEl.textContent = JSON.stringify(data, null, 2);
+            alert("Tạo session lỗi");
+            return;
+        }
+
+        currentSession = data;
+
+        sessionBox.style.display = "";
+        sessionIdEl.textContent = data.sessionId;
+        smsToEl.textContent = data.smsGatewayNumber;
+        smsBodyEl.textContent = data.smsBody;
+        smsLinkEl.href = data.smsUri;
+        debugEl.textContent = JSON.stringify(data, null, 2);
+
+        statusEl.textContent = "Pending";
+        statusEl.className = "status pending";
+
+        qrcodeEl.innerHTML = "";
+        new QRCode(qrcodeEl, {
+            text: data.qrText,
+            width: 240,
+            height: 240
+        });
+
+        pollTimer = setInterval(async () => {
+            await refreshStatus();
+        }, 2000);
+
+        await refreshStatus();
+    });
+
+    btnSimulate.addEventListener("click", async () => {
+        if (!currentSession) {
+            alert("Chưa có session");
+            return;
+        }
+
+        const payload = {
+            from: currentSession.phoneNumber,
+            to: currentSession.smsGatewayNumber,
+            body: currentSession.smsBody
+        };
+
+        const res = await fetch("/api/sms/simulate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        debugEl.textContent = JSON.stringify(data, null, 2);
+
+        await refreshStatus();
+    });
+
+    async function refreshStatus() {
+        if (!currentSession) return;
+
+        const res = await fetch(`/api/verification/status/${currentSession.sessionId}`);
+        const data = await res.json();
+        debugEl.textContent = JSON.stringify(data, null, 2);
+
+        if (!res.ok) return;
+
+        if (data.status === "Verified") {
+            statusEl.textContent = "Verified";
+            statusEl.className = "status verified";
+            clearInterval(pollTimer);
+            pollTimer = null;
+        } else {
+            statusEl.textContent = "Pending";
+            statusEl.className = "status pending";
+        }
+    }
+    </script>
+</body>
+</html>
